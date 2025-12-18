@@ -1,4 +1,4 @@
-module github.com/go-gost/x
+module github.com/AeroCore-IO/x
 
 go 1.24.0
 
@@ -16,6 +16,7 @@ require (
 	github.com/go-gost/plugin v0.2.1
 	github.com/go-gost/relay v0.5.0
 	github.com/go-gost/tls-dissector v0.1.1
+	github.com/go-gost/x v0.8.1
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gobwas/glob v0.2.3
 	github.com/golang/snappy v0.0.4
@@ -93,7 +94,6 @@ require (
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.2 // indirect
-	github.com/onsi/gomega v1.34.2 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/pion/logging v0.2.2 // indirect
 	github.com/pion/transport/v2 v2.0.2 // indirect
