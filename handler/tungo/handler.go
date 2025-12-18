@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/go-gost/core/handler"
+	"github.com/go-gost/core/hop"
 	"github.com/go-gost/core/limiter"
 	"github.com/go-gost/core/limiter/traffic"
 	md "github.com/go-gost/core/metadata"
 	"github.com/go-gost/core/observer"
 	"github.com/go-gost/core/recorder"
 	xctx "github.com/go-gost/x/ctx"
+	tundec "github.com/go-gost/x/handler/tun"
 	ictx "github.com/go-gost/x/internal/ctx"
 	stats_util "github.com/go-gost/x/internal/util/stats"
 	tun_util "github.com/go-gost/x/internal/util/tun"
@@ -30,13 +32,14 @@ func init() {
 }
 
 type tungoHandler struct {
-	options  handler.Options
-	md       metadata
-	stats    *stats_util.HandlerStats
-	limiter  traffic.TrafficLimiter
-	cancel   context.CancelFunc
-	recorder recorder.RecorderObject
-	stack    *stack.Stack
+	options   handler.Options
+	md        metadata
+	stats     *stats_util.HandlerStats
+	limiter   traffic.TrafficLimiter
+	cancel    context.CancelFunc
+	recorder  recorder.RecorderObject
+	stack     *stack.Stack
+	forwarder hop.Hop
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -81,14 +84,23 @@ func (h *tungoHandler) Init(md md.Metadata) (err error) {
 	return
 }
 
+func (h *tungoHandler) Forward(forwarder hop.Hop) {
+	h.forwarder = forwarder
+	if h.options.Logger != nil {
+		h.options.Logger.Infof("tungo: forwarder injected: %t", forwarder != nil)
+	}
+}
+
 func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handler.HandleOption) error {
 	defer conn.Close()
 
 	log := h.options.Logger
 
 	var config *tun_util.Config
+	var dec tundec.DecisionEvaluator
 	if md := ictx.MetadataFromContext(ctx); md != nil {
 		config, _ = md.Get("config").(*tun_util.Config)
+		dec, _ = md.Get("decisionEvaluator").(tundec.DecisionEvaluator)
 	}
 	if config == nil {
 		err := errors.New("tun: wrong connection type")
@@ -111,7 +123,15 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 	}()
 
 	th := &transportHandler{
-		service: h.options.Service,
+		service:   h.options.Service,
+		dec:       dec,
+		forwarder: h.forwarder,
+		conntrack: newConntrackTable(),
+
+		conntrackCleanupInterval: 30 * time.Second,
+		udpConntrackTTL:          60 * time.Second,
+		tcpConntrackTTLShort:     60 * time.Second,
+		tcpConntrackTTLLong:      5 * time.Minute,
 
 		tcpQueue:   make(chan adapter.TCPConn),
 		udpQueue:   make(chan adapter.UDPConn),
@@ -123,6 +143,8 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		sniffingTimeout:         h.md.sniffingTimeout,
 		sniffingResponseTimeout: h.md.sniffingResponseTimeout,
 		sniffingFallback:        h.md.sniffingFallback,
+
+		proxyDialByDomain: h.md.proxyDialByDomain,
 
 		recorder: h.recorder,
 		stats:    h.stats,

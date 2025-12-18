@@ -5,18 +5,24 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/AeroCore-IO/avionics/pkg/decision"
 	"github.com/go-gost/core/bypass"
+	corechain "github.com/go-gost/core/chain"
 	"github.com/go-gost/core/common/bufpool"
 	"github.com/go-gost/core/handler"
+	"github.com/go-gost/core/hop"
 	"github.com/go-gost/core/observer/stats"
 	"github.com/go-gost/core/recorder"
+	xchain "github.com/go-gost/x/chain"
 	xctx "github.com/go-gost/x/ctx"
 	ictx "github.com/go-gost/x/internal/ctx"
 	xnet "github.com/go-gost/x/internal/net"
@@ -37,8 +43,75 @@ const (
 
 var _ adapter.TransportHandler = (*transportHandler)(nil)
 
+// protocolPinnedHop wraps a hop and pins selection to a preferred node name
+// based on the requested target network (tcp* vs udp*).
+//
+// This is used to avoid accidentally routing TCP streams through the UDP/DTLS
+// relay node, which can break HTTPS/TLS even though it may avoid ws 1006.
+type protocolPinnedHop struct {
+	base        hop.Hop
+	tcpNodeName string
+	udpNodeName string
+}
+
+func (h protocolPinnedHop) Select(ctx context.Context, opts ...hop.SelectOption) *corechain.Node {
+	if h.base == nil {
+		return nil
+	}
+
+	var so hop.SelectOptions
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&so)
+		}
+	}
+
+	preferred := h.tcpNodeName
+	if strings.HasPrefix(strings.ToLower(so.Network), "udp") {
+		preferred = h.udpNodeName
+	}
+
+	if preferred != "" {
+		if nl, ok := any(h.base).(hop.NodeList); ok {
+			for _, n := range nl.Nodes() {
+				if n != nil && n.Name == preferred {
+					return n
+				}
+			}
+		}
+	}
+
+	return h.base.Select(ctx, opts...)
+}
+
+func normalizeProxyHost(host string) (string, bool) {
+	host = strings.ToLower(strings.TrimSpace(host))
+	host = strings.TrimSuffix(host, ".")
+	host = strings.Trim(host, "[]")
+	if host == "" {
+		return "", false
+	}
+	if net.ParseIP(host) != nil {
+		return "", false
+	}
+	return host, true
+}
+
 type transportHandler struct {
 	service string
+	dec     interface {
+		CheckTrafficRules(input decision.RuleInput) *decision.TrafficDecision
+		ResolveMetadata(srcIP, dstIP string, srcPort, dstPort int, proto string) (appID string, hostname string)
+	}
+	forwarder hop.Hop
+	conntrack *conntrackTable
+
+	proxyDialByDomain bool
+
+	conntrackCleanupInterval time.Duration
+	udpConntrackTTL          time.Duration
+	tcpConntrackTTLShort     time.Duration
+	tcpConntrackTTLLong      time.Duration
 
 	// Unbuffered TCP/UDP queues.
 	tcpQueue chan adapter.TCPConn
@@ -74,16 +147,83 @@ func (h *transportHandler) HandleUDP(conn adapter.UDPConn) {
 }
 
 func (h *transportHandler) process(ctx context.Context) {
+	var cleanupTicker *time.Ticker
+	if h.conntrack != nil {
+		interval := h.conntrackCleanupInterval
+		if interval <= 0 {
+			interval = 30 * time.Second
+		}
+		cleanupTicker = time.NewTicker(interval)
+		defer cleanupTicker.Stop()
+	}
+
 	for {
 		select {
 		case conn := <-h.tcpQueue:
 			go h.handleTCPConn(conn)
 		case conn := <-h.udpQueue:
 			go h.handleUDPConn(conn)
+		case <-func() <-chan time.Time {
+			if cleanupTicker == nil {
+				return nil
+			}
+			return cleanupTicker.C
+		}():
+			_ = h.conntrack.Cleanup(time.Now())
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+type touchConn struct {
+	net.Conn
+	touch func()
+}
+
+func (c *touchConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && c.touch != nil {
+		c.touch()
+	}
+	return n, err
+}
+
+func (c *touchConn) Write(p []byte) (int, error) {
+	n, err := c.Conn.Write(p)
+	if n > 0 && c.touch != nil {
+		c.touch()
+	}
+	return n, err
+}
+
+func (h *transportHandler) flowKeyTCP(srcIP, dstIP netip.Addr, srcPort, dstPort uint16) flowKey {
+	return flowKey{proto: flowProtoTCP, srcIP: srcIP, dstIP: dstIP, srcPort: srcPort, dstPort: dstPort}
+}
+
+func (h *transportHandler) flowKeyUDP(srcIP, dstIP netip.Addr, srcPort, dstPort uint16) flowKey {
+	return flowKey{proto: flowProtoUDP, srcIP: srcIP, dstIP: dstIP, srcPort: srcPort, dstPort: dstPort}
+}
+
+func (h *transportHandler) getCachedPolicy(now time.Time, k flowKey) (flowPolicy, bool) {
+	if h == nil || h.conntrack == nil {
+		return flowPolicy{}, false
+	}
+	return h.conntrack.Get(now, k)
+}
+
+func (h *transportHandler) putCachedPolicy(now time.Time, k flowKey, p flowPolicy, ttl time.Duration) {
+	if h == nil || h.conntrack == nil {
+		return
+	}
+	h.conntrack.Put(now, k, p, ttl)
+}
+
+func (h *transportHandler) touchPolicy(now time.Time, k flowKey, ttl time.Duration) {
+	if h == nil || h.conntrack == nil {
+		return
+	}
+	h.conntrack.Touch(now, k, ttl)
 }
 
 // ProcessAsync can be safely called multiple times, but will only be effective once.
@@ -142,6 +282,8 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 
 	log.Debugf("%s <> %s", remoteAddr.String(), dstAddr.String())
 
+	key := h.flowKeyTCP(remoteIP, dstIP, id.RemotePort, id.LocalPort)
+
 	var err error
 	var conn net.Conn = originConn
 
@@ -191,17 +333,98 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 			var cc net.Conn
 			var err error
+			now := time.Now()
+			p, ok := h.getCachedPolicy(now, key)
+			if !ok {
+				useProxy := false
+				hostname := ""
+				if h.dec != nil {
+					appID, hname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), "TCP")
+					hostname = hname
+					if hostname == "" {
+						if host, _, _ := net.SplitHostPort(address); host != "" {
+							hostname = host
+						} else if strings.TrimSpace(address) != "" {
+							hostname = strings.TrimSpace(address)
+						}
+					}
+					if hostname == "" {
+						type domainLookup interface{ GetDomainsForIP(string) []string }
+						if dl, ok := any(h.dec).(domainLookup); ok {
+							if domains := dl.GetDomainsForIP(dstIP.String()); len(domains) > 0 {
+								hostname = domains[0]
+							}
+						}
+					}
+					if d := h.dec.CheckTrafficRules(decision.RuleInput{
+						SteamAppID: appID,
+						DestHost:   dstIP.String(),
+						DestPort:   int32(id.LocalPort),
+						Protocol:   "TCP",
+						DestDomain: hostname,
+					}); d != nil {
+						log.Debugf("traffic decision: action=%s rule=%s appID=%s dst=%s domain=%s", d.Action, d.RuleName, appID, dstAddr.String(), hostname)
+						if strings.EqualFold(strings.TrimSpace(string(d.Action)), "PROXY") {
+							useProxy = true
+						}
+					}
+				}
+				p = flowPolicy{useProxy: useProxy, proxyHost: hostname}
+				ttl := h.tcpConntrackTTLShort
+				if ttl <= 0 {
+					ttl = 60 * time.Second
+				}
+				h.putCachedPolicy(now, key, p, ttl)
+			}
+
+			useProxy := p.useProxy
+			proxyHost := p.proxyHost
 			if address != "" {
 				host, _, _ := net.SplitHostPort(address)
 				if host == "" {
 					host = address
 				}
 				_, port, _ := net.SplitHostPort(dstAddr.String())
-				address = net.JoinHostPort(strings.Trim(host, "[]"), port)
+				if useProxy {
+					if !h.proxyDialByDomain {
+						address = dstAddr.String()
+					} else if ph, ok := normalizeProxyHost(proxyHost); ok {
+						address = net.JoinHostPort(ph, port)
+					} else {
+						address = net.JoinHostPort(strings.Trim(host, "[]"), port)
+					}
+				} else {
+					address = net.JoinHostPort(strings.Trim(host, "[]"), port)
+				}
 				ro.Host = address
 
 				var buf bytes.Buffer
-				cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
+				if useProxy && h.forwarder != nil {
+					baseRouter, ok := any(h.opts.Router).(interface {
+						Options() *corechain.RouterOptions
+					})
+					if ok {
+						c := xchain.NewChain("tungo-forwarder")
+						c.AddHop(protocolPinnedHop{base: h.forwarder, tcpNodeName: "tcp-wss", udpNodeName: "udp-dtls"})
+						bo := baseRouter.Options()
+						proxyRouter := xchain.NewRouter(
+							corechain.RetriesRouterOption(bo.Retries),
+							corechain.TimeoutRouterOption(bo.Timeout),
+							corechain.InterfaceRouterOption(bo.IfceName),
+							corechain.NetnsRouterOption(bo.Netns),
+							corechain.SockOptsRouterOption(bo.SockOpts),
+							corechain.ResolverRouterOption(bo.Resolver),
+							corechain.HostMapperRouterOption(bo.HostMapper),
+							corechain.ChainRouterOption(c),
+							corechain.LoggerRouterOption(log),
+						)
+						cc, err = proxyRouter.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
+					} else {
+						cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
+					}
+				} else {
+					cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
+				}
 				ro.Route = buf.String()
 				if err != nil && !h.sniffingFallback {
 					return nil, err
@@ -213,6 +436,14 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 				cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dstAddr.String())
 				ro.Route = buf.String()
 				ro.Host = dstAddr.String()
+			}
+
+			if err == nil {
+				ttl := h.tcpConntrackTTLLong
+				if ttl <= 0 {
+					ttl = 5 * time.Minute
+				}
+				h.touchPolicy(time.Now(), key, ttl)
 			}
 
 			return cc, err
@@ -253,6 +484,49 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 		}
 	}
 
+	useProxy := false
+	hostname := ""
+	if h.dec != nil {
+		now := time.Now()
+		if p, ok := h.getCachedPolicy(now, key); ok {
+			useProxy = p.useProxy
+			hostname = p.proxyHost
+		} else {
+			appID, hname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), "TCP")
+			hostname = hname
+			if hostname == "" {
+				type domainLookup interface{ GetDomainsForIP(string) []string }
+				if dl, ok := any(h.dec).(domainLookup); ok {
+					if domains := dl.GetDomainsForIP(dstIP.String()); len(domains) > 0 {
+						hostname = domains[0]
+					}
+				}
+			}
+			if d := h.dec.CheckTrafficRules(decision.RuleInput{
+				SteamAppID: appID,
+				DestHost:   dstIP.String(),
+				DestPort:   int32(id.LocalPort),
+				Protocol:   "TCP",
+				DestDomain: hostname,
+			}); d != nil {
+				log.Debugf("traffic decision: action=%s rule=%s appID=%s dst=%s domain=%s", d.Action, d.RuleName, appID, dstAddr.String(), hostname)
+				if strings.EqualFold(strings.TrimSpace(string(d.Action)), "PROXY") {
+					useProxy = true
+				}
+			}
+			p := flowPolicy{action: "", useProxy: useProxy, proxyHost: hostname}
+			ttl := h.tcpConntrackTTLShort
+			if ttl <= 0 {
+				ttl = 60 * time.Second
+			}
+			h.putCachedPolicy(now, key, p, ttl)
+		}
+	}
+	log.Debugf("traffic routing: useProxy=%t forwarderInjected=%t", useProxy, h.forwarder != nil)
+	if useProxy && h.forwarder == nil {
+		log.Warnf("traffic decision is PROXY but forwarder is nil; falling back to direct dial")
+	}
+
 	if h.opts.Bypass != nil &&
 		h.opts.Bypass.Contains(ctx, network, dstAddr.String(), bypass.WithService(h.opts.Service)) {
 		log.Debug("bypass: ", dstAddr)
@@ -260,7 +534,44 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 	}
 
 	var buf bytes.Buffer
-	cc, err := h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dstAddr.String())
+	var cc net.Conn
+	dialAddr := dstAddr.String()
+	if useProxy && h.proxyDialByDomain {
+		if ph, ok := normalizeProxyHost(hostname); ok {
+			dialAddr = net.JoinHostPort(ph, strconv.Itoa(int(dstAddr.Port())))
+		}
+	}
+	// reuse the outer err so the deferred recorder sees failures
+	if useProxy && h.forwarder != nil {
+		baseRouter, ok := any(h.opts.Router).(interface {
+			Options() *corechain.RouterOptions
+		})
+		if ok {
+			bo := baseRouter.Options()
+			if bo != nil {
+				c := xchain.NewChain("tungo-forwarder")
+				c.AddHop(protocolPinnedHop{base: h.forwarder, tcpNodeName: "tcp-wss", udpNodeName: "udp-dtls"})
+				proxyRouter := xchain.NewRouter(
+					corechain.RetriesRouterOption(bo.Retries),
+					corechain.TimeoutRouterOption(bo.Timeout),
+					corechain.InterfaceRouterOption(bo.IfceName),
+					corechain.NetnsRouterOption(bo.Netns),
+					corechain.SockOptsRouterOption(bo.SockOpts),
+					corechain.ResolverRouterOption(bo.Resolver),
+					corechain.HostMapperRouterOption(bo.HostMapper),
+					corechain.ChainRouterOption(c),
+					corechain.LoggerRouterOption(log),
+				)
+				cc, err = proxyRouter.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
+			} else {
+				cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
+			}
+		} else {
+			cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
+		}
+	} else {
+		cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
+	}
 	ro.Route = buf.String()
 	if err != nil {
 		log.Errorf("dial %s: %v", dstAddr.String(), err)
@@ -268,12 +579,47 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 	}
 	defer cc.Close()
 
+	// We have a successfully established outbound connection; extend TTL.
+	{
+		ttl := h.tcpConntrackTTLLong
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		h.touchPolicy(time.Now(), key, ttl)
+	}
+
 	ro.SrcAddr = cc.LocalAddr().String()
 	log = log.WithFields(map[string]any{"src": ro.SrcAddr})
 
 	t := time.Now()
 	log.Infof("%s <-> %s", remoteAddr, dstAddr)
-	xnet.Pipe(ctx, conn, cc)
+	{
+		ttl := h.tcpConntrackTTLLong
+		if ttl <= 0 {
+			ttl = 5 * time.Minute
+		}
+		touch := func() {
+			h.touchPolicy(time.Now(), key, ttl)
+		}
+		c1 := &touchConn{Conn: conn, touch: touch}
+		c2 := &touchConn{Conn: cc, touch: touch}
+		if e := xnet.Pipe(ctx, c1, c2); e != nil {
+			// A few errors are expected during normal teardown (client cancel, half-close,
+			// concurrent close races). Only surface actionable failures.
+			msg := e.Error()
+			benign := errors.Is(e, context.Canceled) || errors.Is(e, net.ErrClosed) ||
+				strings.Contains(msg, "use of closed network connection") ||
+				strings.Contains(msg, "websocket: close 1000") ||
+				strings.Contains(msg, "websocket: close 1001")
+
+			if !benign {
+				log.Debugf("pipe error: %v", e)
+				if err == nil {
+					err = e
+				}
+			}
+		}
+	}
 	log.WithFields(map[string]any{
 		"duration": time.Since(t),
 	}).Infof("%s >-< %s", remoteAddr, dstAddr)
@@ -315,6 +661,45 @@ func (h *transportHandler) handleUDPConn(uc adapter.UDPConn) {
 
 	log.Debugf("%s <> %s", remoteAddr.String(), dstAddr.String())
 
+	key := h.flowKeyUDP(remoteIP, dstIP, id.RemotePort, id.LocalPort)
+
+	udpTTL := h.udpConntrackTTL
+	if udpTTL <= 0 {
+		udpTTL = 60 * time.Second
+	}
+
+	useProxy := false
+	if p, ok := h.getCachedPolicy(time.Now(), key); ok {
+		useProxy = p.useProxy
+	} else if h.dec != nil {
+		appID, hostname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), "UDP")
+		if hostname == "" {
+			type domainLookup interface{ GetDomainsForIP(string) []string }
+			if dl, ok := any(h.dec).(domainLookup); ok {
+				if domains := dl.GetDomainsForIP(dstIP.String()); len(domains) > 0 {
+					hostname = domains[0]
+				}
+			}
+		}
+		if d := h.dec.CheckTrafficRules(decision.RuleInput{
+			SteamAppID: appID,
+			DestHost:   dstIP.String(),
+			DestPort:   int32(id.LocalPort),
+			Protocol:   "UDP",
+			DestDomain: hostname,
+		}); d != nil {
+			log.Debugf("traffic decision: action=%s rule=%s appID=%s dst=%s domain=%s", d.Action, d.RuleName, appID, dstAddr.String(), hostname)
+			if strings.EqualFold(strings.TrimSpace(string(d.Action)), "PROXY") {
+				useProxy = true
+			}
+		}
+		h.putCachedPolicy(time.Now(), key, flowPolicy{useProxy: useProxy}, udpTTL)
+	}
+	log.Debugf("traffic routing: useProxy=%t forwarderInjected=%t", useProxy, h.forwarder != nil)
+	if useProxy && h.forwarder == nil {
+		log.Warnf("traffic decision is PROXY but forwarder is nil; falling back to direct dial")
+	}
+
 	var err error
 	var conn net.Conn = uc
 
@@ -340,12 +725,53 @@ func (h *transportHandler) handleUDPConn(uc adapter.UDPConn) {
 		}).Infof("%s >< %s", remoteAddr.String(), dstAddr.String())
 	}()
 
-	cc, err := h.opts.Router.Dial(ctx, "udp", dstAddr.String())
+	var buf bytes.Buffer
+	var cc net.Conn
+	if useProxy && h.forwarder != nil {
+		baseRouter, ok := any(h.opts.Router).(interface {
+			Options() *corechain.RouterOptions
+		})
+		if ok {
+			bo := baseRouter.Options()
+			if bo != nil {
+				c := xchain.NewChain("tungo-forwarder")
+				c.AddHop(protocolPinnedHop{base: h.forwarder, tcpNodeName: "tcp-wss", udpNodeName: "udp-dtls"})
+				proxyRouter := xchain.NewRouter(
+					corechain.RetriesRouterOption(bo.Retries),
+					corechain.TimeoutRouterOption(bo.Timeout),
+					corechain.InterfaceRouterOption(bo.IfceName),
+					corechain.NetnsRouterOption(bo.Netns),
+					corechain.SockOptsRouterOption(bo.SockOpts),
+					corechain.ResolverRouterOption(bo.Resolver),
+					corechain.HostMapperRouterOption(bo.HostMapper),
+					corechain.ChainRouterOption(c),
+					corechain.LoggerRouterOption(log),
+				)
+				cc, err = proxyRouter.Dial(ictx.ContextWithBuffer(ctx, &buf), "udp", dstAddr.String())
+			} else {
+				cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "udp", dstAddr.String())
+			}
+		} else {
+			cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "udp", dstAddr.String())
+		}
+	} else {
+		cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), "udp", dstAddr.String())
+	}
 	if err != nil {
 		log.Errorf("dial %s: %v", dstAddr.String(), err)
 		return
 	}
 	defer cc.Close()
+
+	// Refresh UDP conntrack on activity.
+	{
+		touch := func() {
+			h.touchPolicy(time.Now(), key, udpTTL)
+		}
+		conn = &touchConn{Conn: conn, touch: touch}
+		cc = &touchConn{Conn: cc, touch: touch}
+		h.touchPolicy(time.Now(), key, udpTTL)
+	}
 
 	ro.SrcAddr = cc.LocalAddr().String()
 	log = log.WithFields(map[string]any{"src": ro.SrcAddr})
