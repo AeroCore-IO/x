@@ -84,18 +84,48 @@ func (c *websocketConn) SetWriteDeadline(t time.Time) error {
 	return c.Conn.SetWriteDeadline(t)
 }
 
+func (c *websocketConn) Close() error {
+	// gorilla/websocket's Conn.Close() closes the underlying net.Conn without
+	// sending a close control frame. That often shows up as `close 1006
+	// (abnormal closure): unexpected EOF` on the peer.
+	//
+	// Best-effort: send a normal close frame, then close the connection.
+	c.mux.Lock()
+	deadline := time.Now().Add(2 * time.Second)
+	_ = c.Conn.SetWriteDeadline(deadline)
+	_ = c.Conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		deadline,
+	)
+	_ = c.Conn.SetWriteDeadline(time.Time{})
+	c.mux.Unlock()
+
+	return c.Conn.Close()
+}
+
 func (c *websocketConn) CloseRead() error {
-	if sc, ok := c.Conn.NetConn().(xio.CloseRead); ok {
-		return sc.CloseRead()
-	}
+	// WebSocket is message-oriented; doing a TCP half-close on the underlying
+	// connection can cause abnormal closures (e.g. close 1006) for the peer.
+	// We intentionally do not expose a half-close read.
 	return xio.ErrUnsupported
 }
 
 func (c *websocketConn) CloseWrite() error {
-	if sc, ok := c.Conn.NetConn().(xio.CloseWrite); ok {
-		return sc.CloseWrite()
-	}
-	return xio.ErrUnsupported
+	// WebSocket does not support TCP half-close semantics. To signal EOF to the
+	// peer, send a WebSocket close control frame.
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	deadline := time.Now().Add(2 * time.Second)
+	_ = c.Conn.SetWriteDeadline(deadline)
+	err := c.Conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		deadline,
+	)
+	_ = c.Conn.SetWriteDeadline(time.Time{})
+	return err
 }
 
 func (c *websocketConn) Context() context.Context {
