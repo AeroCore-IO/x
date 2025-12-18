@@ -1,11 +1,8 @@
-module github.com/AeroCore-IO/x
+module github.com/go-gost/x
 
 go 1.24.5
 
-replace github.com/go-gost/x => github.com/AeroCore-IO/x v0.0.0-20251218091257-703a35206168
-
 require (
-	github.com/AeroCore-IO/avionics v0.0.0-20251218085906-d16bc506ed20
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
 	github.com/gin-contrib/cors v1.7.2
@@ -17,7 +14,6 @@ require (
 	github.com/go-gost/plugin v0.2.1
 	github.com/go-gost/relay v0.5.0
 	github.com/go-gost/tls-dissector v0.1.1
-	github.com/go-gost/x v0.0.0-20231029022713-e8d5e719a434
 	github.com/go-redis/redis/v8 v8.11.5
 	github.com/gobwas/glob v0.2.3
 	github.com/golang/snappy v0.0.4
@@ -62,6 +58,7 @@ require (
 )
 
 require (
+	github.com/AeroCore-IO/avionics v0.0.7 // indirect
 	github.com/alessio/shellescape v1.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bytedance/sonic v1.11.6 // indirect
