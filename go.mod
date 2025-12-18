@@ -1,11 +1,9 @@
-module github.com/go-gost/x
+module github.com/AeroCore-IO/x
 
 go 1.24.5
 
-replace github.com/AeroCore-IO/avionics => ../ac-avionics
-
 require (
-	github.com/AeroCore-IO/avionics v0.0.0-00010101000000-000000000000
+	github.com/AeroCore-IO/avionics v0.0.0-20251218085906-d16bc506ed20
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
 	github.com/gin-contrib/cors v1.7.2
