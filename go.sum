@@ -1,5 +1,6 @@
 cloud.google.com/go v0.26.0/go.mod h1:aQUYkXzVsufM+DwF1aE+0xfcU+56JwCaLick0ClmMTw=
-github.com/AeroCore-IO/avionics v0.0.0-20251218085906-d16bc506ed20/go.mod h1:U36Vy1AWHmbpTrFF22vXssJqfR0HNcdxy0bu2NC8FQY=
+github.com/AeroCore-IO/x v0.0.0-20251218091257-703a35206168 h1:cJ/T0UH3JzJCEWQeFNLOB3gLU93sIGMw4Kmt69lt8oQ=
+github.com/AeroCore-IO/x v0.0.0-20251218091257-703a35206168/go.mod h1:CvhuLmqsU4Js4HuN+Bmc5S7V3yeL8ei46jLenyew/PA=
 github.com/BurntSushi/toml v0.3.1/go.mod h1:xHWCNGjB5oqiDr8zfno3MHue2Ht5sIBksp03qcyfWMU=
 github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137 h1:s6gZFSlWYmbqAuRjVTiNNhvNRfY2Wxp9nhfyel4rklc=
 github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137/go.mod h1:OMCwj8VM1Kc9e19TLln2VL61YJF0x1XFtfdL4JdbSyE=
@@ -66,8 +67,6 @@ github.com/go-gost/relay v0.5.0 h1:JG1tgy/KWiVXS0ukuVXvbM0kbYuJTWxYpJ5JwzsCf/c=
 github.com/go-gost/relay v0.5.0/go.mod h1:lcX+23LCQ3khIeASBo+tJ/WbwXFO32/N5YN6ucuYTG8=
 github.com/go-gost/tls-dissector v0.1.1 h1:2zUOTPzCQAUQ54Rpy0UEi3JPMQSYsIFSeFeKrzmkCoU=
 github.com/go-gost/tls-dissector v0.1.1/go.mod h1:/9QfdewqmHdaE362Hv5nDaSWLx3pCmtD870d6GaquXs=
-github.com/go-gost/x v0.8.1 h1:cfV/wgagsitTjW18c95OlrrFQTyQtjvDD5+MO3IEIjI=
-github.com/go-gost/x v0.8.1/go.mod h1:jJJrR+rhU9kCcQnMMwn9BlLzX7YlpWAGb/T1PNAVcN4=
 github.com/go-playground/assert/v2 v2.2.0 h1:JvknZsQTYeFEAhQwI4qEt9cyV5ONwRHC+lYKSsYSR8s=
 github.com/go-playground/assert/v2 v2.2.0/go.mod h1:VDjEfimB/XKnb+ZQfWdccd7VUvScMdVu0Titje2rxJ4=
 github.com/go-playground/locales v0.14.1 h1:EWaQ/wswjilfKLTECiXz7Rh+3BjFhfDFKv/oXslEjJA=

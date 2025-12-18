@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	tls_util "github.com/AeroCore-IO/x/internal/util/tls"
 	"github.com/go-gost/core/auth"
 	"github.com/go-gost/core/chain"
 	"github.com/go-gost/core/handler"
@@ -28,7 +29,6 @@ import (
 	hop_parser "github.com/go-gost/x/config/parsing/hop"
 	logger_parser "github.com/go-gost/x/config/parsing/logger"
 	selector_parser "github.com/go-gost/x/config/parsing/selector"
-	tls_util "github.com/go-gost/x/internal/util/tls"
 	cache_limiter "github.com/go-gost/x/limiter/traffic/cache"
 	"github.com/go-gost/x/metadata"
 	mdutil "github.com/go-gost/x/metadata/util"
