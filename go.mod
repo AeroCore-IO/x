@@ -3,6 +3,7 @@ module github.com/go-gost/x
 go 1.24.5
 
 require (
+	github.com/AeroCore-IO/avionics v0.0.0-20251218085906-d16bc506ed20
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
 	github.com/gin-contrib/cors v1.7.2
@@ -58,7 +59,6 @@ require (
 )
 
 require (
-	github.com/AeroCore-IO/avionics v0.0.7 // indirect
 	github.com/alessio/shellescape v1.4.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/bytedance/sonic v1.11.6 // indirect
