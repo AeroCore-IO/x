@@ -3,7 +3,7 @@ module github.com/go-gost/x
 go 1.24.5
 
 require (
-	github.com/AeroCore-IO/avionics v0.0.0-20251218085906-d16bc506ed20
+	github.com/AeroCore-IO/avionics v0.0.0-20251221131059-1dad1c71dede
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d
 	github.com/gin-contrib/cors v1.7.2
