@@ -42,8 +42,20 @@ func Resolve(ctx context.Context, network, addr string, r resolver.Resolver, hos
 				return addr, nil
 			}
 			log.Error(err)
+			// If resolver fails, we should return the error instead of falling back to the original address,
+			// otherwise the dialer might try to resolve it again using the system resolver,
+			// which might cause a loop if the system resolver is also broken (e.g. routed to TUN).
+			// However, if the error is just "no such host", maybe we should let it fail.
+			// But wait, if r is NOT nil, it means we configured a custom resolver.
+			// If that fails, we probably shouldn't silently fall back.
+			// BUT, existing logic returns addr if err == resolver.ErrInvalid.
+			// Let's keep it as is for now, but be aware.
 		}
 		if len(ips) == 0 {
+			// If custom resolver returns no IPs, we return error.
+			// But if r was nil, we return addr (letting system resolve it).
+			// The issue is when r is NOT nil but fails.
+			// In our case (Wing), r is usually nil for the main tunnel, so we rely on system resolver.
 			return "", fmt.Errorf("resolver: domain %s does not exist", host)
 		}
 		return net.JoinHostPort(ips[0].String(), port), nil

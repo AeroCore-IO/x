@@ -330,6 +330,18 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 			conn.SetReadDeadline(time.Time{})
 		}
 
+		protoForNetwork := func(network string) string {
+			n := strings.ToLower(strings.TrimSpace(network))
+			switch {
+			case strings.HasPrefix(n, "udp"):
+				return "UDP"
+			case strings.HasPrefix(n, "tcp"):
+				return "TCP"
+			default:
+				return "TCP"
+			}
+		}
+
 		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 			var cc net.Conn
 			var err error
@@ -339,7 +351,8 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 				useProxy := false
 				hostname := ""
 				if h.dec != nil {
-					appID, hname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), "TCP")
+					proto := protoForNetwork(network)
+					appID, hname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), proto)
 					hostname = hname
 					if hostname == "" {
 						if host, _, _ := net.SplitHostPort(address); host != "" {
@@ -360,7 +373,7 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 						SteamAppID: appID,
 						DestHost:   dstIP.String(),
 						DestPort:   int32(id.LocalPort),
-						Protocol:   "TCP",
+						Protocol:   proto,
 						DestDomain: hostname,
 					}); d != nil {
 						log.Debugf("traffic decision: action=%s rule=%s appID=%s dst=%s domain=%s", d.Action, d.RuleName, appID, dstAddr.String(), hostname)
@@ -492,7 +505,20 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 			useProxy = p.useProxy
 			hostname = p.proxyHost
 		} else {
-			appID, hname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), "TCP")
+			protoForNetwork := func(network string) string {
+				n := strings.ToLower(strings.TrimSpace(network))
+				switch {
+				case strings.HasPrefix(n, "udp"):
+					return "UDP"
+				case strings.HasPrefix(n, "tcp"):
+					return "TCP"
+				default:
+					return "TCP"
+				}
+			}
+
+			proto := protoForNetwork(network)
+			appID, hname := h.dec.ResolveMetadata(remoteIP.String(), dstIP.String(), int(id.RemotePort), int(id.LocalPort), proto)
 			hostname = hname
 			if hostname == "" {
 				type domainLookup interface{ GetDomainsForIP(string) []string }
@@ -506,7 +532,7 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 				SteamAppID: appID,
 				DestHost:   dstIP.String(),
 				DestPort:   int32(id.LocalPort),
-				Protocol:   "TCP",
+				Protocol:   proto,
 				DestDomain: hostname,
 			}); d != nil {
 				log.Debugf("traffic decision: action=%s rule=%s appID=%s dst=%s domain=%s", d.Action, d.RuleName, appID, dstAddr.String(), hostname)
