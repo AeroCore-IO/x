@@ -57,8 +57,8 @@ func (d *dtlsDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialO
 		if err != nil {
 			return nil, err
 		}
-		
-		// Use xdialer to dial the UDP socket (it handles binding/marking if needed, 
+
+		// Use xdialer to dial the UDP socket (it handles binding/marking if needed,
 		// though we already resolved so it's just a direct dial)
 		conn, err = (&xdialer.Dialer{
 			Mark: d.md.mark,
