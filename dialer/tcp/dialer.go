@@ -8,6 +8,7 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	xctx "github.com/go-gost/x/ctx"
+	xdialer "github.com/go-gost/x/internal/net/dialer"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	"github.com/go-gost/x/registry"
 )
@@ -44,7 +45,17 @@ func (d *tcpDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialOp
 		opt(&options)
 	}
 
-	conn, err := options.Dialer.Dial(ctx, "tcp", addr)
+	var conn net.Conn
+	var err error
+
+	if d.md.mark > 0 {
+		conn, err = (&xdialer.Dialer{
+			Mark: d.md.mark,
+			Log:  d.logger,
+		}).Dial(ctx, "tcp", addr)
+	} else {
+		conn, err = options.Dialer.Dial(ctx, "tcp", addr)
+	}
 	if err != nil {
 		d.logger.Error(err)
 	}

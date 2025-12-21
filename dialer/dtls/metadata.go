@@ -15,9 +15,11 @@ type metadata struct {
 	mtu            int
 	bufferSize     int
 	flightInterval time.Duration
+	mark           int
 }
 
 func (d *dtlsDialer) parseMetadata(md mdata.Metadata) (err error) {
+	d.md.mark = mdutil.GetInt(md, "so_mark", "mark")
 	d.md.mtu = mdutil.GetInt(md, "dtls.mtu", "mtu")
 	d.md.bufferSize = mdutil.GetInt(md, "dtls.bufferSize", "bufferSize")
 	if d.md.bufferSize <= 0 {

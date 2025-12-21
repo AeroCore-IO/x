@@ -25,6 +25,7 @@ type metadata struct {
 
 	header            http.Header
 	keepaliveInterval time.Duration
+	mark              int
 }
 
 func (d *wsDialer) parseMetadata(md mdata.Metadata) (err error) {
@@ -34,6 +35,8 @@ func (d *wsDialer) parseMetadata(md mdata.Metadata) (err error) {
 	if d.md.path == "" {
 		d.md.path = defaultPath
 	}
+
+	d.md.mark = mdutil.GetInt(md, "so_mark", "mark")
 
 	d.md.handshakeTimeout = mdutil.GetDuration(md, "ws.handshakeTimeout", "handshakeTimeout")
 	d.md.readHeaderTimeout = mdutil.GetDuration(md, "ws.readHeaderTimeout", "readHeaderTimeout")

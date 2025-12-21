@@ -171,6 +171,36 @@ func (d *Dialer) dialOnce(ctx context.Context, network, addr, ifceName string, i
 			})
 		},
 	}
+	if d.Mark != 0 {
+		netd.Resolver = &net.Resolver{
+			PreferGo: true,
+			Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+				log.Debugf("resolving %s/%s with mark %d", address, network, d.Mark)
+				d2 := net.Dialer{
+					Control: func(network, address string, c syscall.RawConn) error {
+						return c.Control(func(fd uintptr) {
+							if err := setMark(fd, d.Mark); err != nil {
+								log.Warnf("resolver set mark %d: %v", d.Mark, err)
+							} else {
+								log.Debugf("resolver set mark %d success", d.Mark)
+							}
+						})
+					},
+				}
+				return d2.DialContext(ctx, network, address)
+			},
+		}
+	} else {
+		// If no mark is set, we still want to use the custom resolver if we are in a netns
+		// or if we want to force Go's resolver to respect the interface binding.
+		// However, without a mark, we just use the default behavior which might use cgo.
+		// To be safe and consistent, we can force PreferGo if we are binding to an interface.
+		if ifceName != "" {
+			netd.Resolver = &net.Resolver{
+				PreferGo: true,
+			}
+		}
+	}
 	if d.Netns != "" {
 		// https://github.com/golang/go/issues/44922#issuecomment-796645858
 		netd.FallbackDelay = -1

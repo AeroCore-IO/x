@@ -8,6 +8,7 @@ import (
 
 const (
 	dialTimeout = "dialTimeout"
+	mark        = "so_mark"
 )
 
 const (
@@ -16,8 +17,11 @@ const (
 
 type metadata struct {
 	dialTimeout time.Duration
+	mark        int
 }
 
 func (d *tcpDialer) parseMetadata(md md.Metadata) (err error) {
+	d.md.dialTimeout = md.GetDuration(dialTimeout)
+	d.md.mark = md.GetInt(mark)
 	return
 }

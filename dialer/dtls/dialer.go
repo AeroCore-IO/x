@@ -9,6 +9,7 @@ import (
 	"github.com/go-gost/core/logger"
 	md "github.com/go-gost/core/metadata"
 	xctx "github.com/go-gost/x/ctx"
+	xdialer "github.com/go-gost/x/internal/net/dialer"
 	"github.com/go-gost/x/internal/net/proxyproto"
 	xdtls "github.com/go-gost/x/internal/util/dtls"
 	"github.com/go-gost/x/registry"
@@ -47,7 +48,25 @@ func (d *dtlsDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialO
 		opt(&options)
 	}
 
-	conn, err := options.Dialer.Dial(ctx, "udp", addr)
+	var conn net.Conn
+	var err error
+
+	if d.md.mark > 0 {
+		// Resolve first using our cached resolver with mark support
+		resolvedAddr, err := resolve(ctx, addr, d.md.mark)
+		if err != nil {
+			return nil, err
+		}
+
+		// Use xdialer to dial the UDP socket (it handles binding/marking if needed,
+		// though we already resolved so it's just a direct dial)
+		conn, err = (&xdialer.Dialer{
+			Mark: d.md.mark,
+			Log:  d.logger,
+		}).Dial(ctx, "udp", resolvedAddr)
+	} else {
+		conn, err = options.Dialer.Dial(ctx, "udp", addr)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +91,7 @@ func (d *dtlsDialer) Dial(ctx context.Context, addr string, opts ...dialer.DialO
 		RootCAs:              tlsCfg.RootCAs,
 		FlightInterval:       d.md.flightInterval,
 		MTU:                  d.md.mtu,
+		SessionStore:         sessionStore,
 	}
 
 	c, err := dtls.ClientWithContext(ctx, conn, &config)
