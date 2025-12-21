@@ -103,6 +103,14 @@ func (r *Router) dial(ctx context.Context, network, address string, log logger.L
 		}
 
 		var ipAddr string
+		// If the address is a domain name, we should resolve it first.
+		// However, if we are using a custom resolver (e.g. for bypassing TUN),
+		// we should let the dialer handle the resolution.
+		// But here, r.options.Resolver is the go-gost internal resolver (e.g. DNS-over-HTTPS),
+		// NOT the net.Resolver used by the dialer.
+		// If r.options.Resolver is nil, xnet.Resolve returns the original address (domain name).
+		// This is what we want: pass the domain name to the dialer, so the dialer
+		// can use its custom net.Resolver (with SO_MARK) to resolve it.
 		ipAddr, err = xnet.Resolve(ctx, "ip", address, r.options.Resolver, r.options.HostMapper, log)
 		if err != nil {
 			log.Error(err)
