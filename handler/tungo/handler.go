@@ -40,6 +40,9 @@ type tungoHandler struct {
 	recorder  recorder.RecorderObject
 	stack     *stack.Stack
 	forwarder hop.Hop
+
+	// udpSem limits concurrent UDP flow handling when non-nil.
+	udpSem chan struct{}
 }
 
 func NewHandler(opts ...handler.Option) handler.Handler {
@@ -56,6 +59,9 @@ func NewHandler(opts ...handler.Option) handler.Handler {
 func (h *tungoHandler) Init(md md.Metadata) (err error) {
 	if err = h.parseMetadata(md); err != nil {
 		return
+	}
+	if h.md.udpMaxConcurrency > 0 {
+		h.udpSem = make(chan struct{}, h.md.udpMaxConcurrency)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -127,6 +133,7 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		dec:       dec,
 		forwarder: h.forwarder,
 		conntrack: newConntrackTable(),
+		udpSem:    h.udpSem,
 
 		conntrackCleanupInterval: 30 * time.Second,
 		udpConntrackTTL:          60 * time.Second,

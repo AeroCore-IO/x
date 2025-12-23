@@ -117,6 +117,9 @@ type transportHandler struct {
 	tcpQueue chan adapter.TCPConn
 	udpQueue chan adapter.UDPConn
 
+	// udpSem limits concurrent UDP flow handling when non-nil.
+	udpSem chan struct{}
+
 	procOnce   sync.Once
 	procCancel context.CancelFunc
 
@@ -135,7 +138,44 @@ type transportHandler struct {
 
 	ipv6 bool
 
+	proxyRouterOnce sync.Once
+	proxyRouter     *xchain.Router
+
 	opts *handler.Options
+}
+
+func (h *transportHandler) getProxyRouter() *xchain.Router {
+	if h == nil || h.forwarder == nil || h.opts == nil || h.opts.Router == nil {
+		return nil
+	}
+	baseRouter, ok := any(h.opts.Router).(interface {
+		Options() *corechain.RouterOptions
+	})
+	if !ok {
+		return nil
+	}
+	bo := baseRouter.Options()
+	if bo == nil {
+		return nil
+	}
+
+	h.proxyRouterOnce.Do(func() {
+		c := xchain.NewChain("tungo-forwarder")
+		c.AddHop(protocolPinnedHop{base: h.forwarder, tcpNodeName: "tcp-wss", udpNodeName: "udp-dtls"})
+		h.proxyRouter = xchain.NewRouter(
+			corechain.RetriesRouterOption(bo.Retries),
+			corechain.TimeoutRouterOption(bo.Timeout),
+			corechain.InterfaceRouterOption(bo.IfceName),
+			corechain.NetnsRouterOption(bo.Netns),
+			corechain.SockOptsRouterOption(bo.SockOpts),
+			corechain.ResolverRouterOption(bo.Resolver),
+			corechain.HostMapperRouterOption(bo.HostMapper),
+			corechain.ChainRouterOption(c),
+			corechain.LoggerRouterOption(h.opts.Logger),
+		)
+	})
+
+	return h.proxyRouter
 }
 
 func (h *transportHandler) HandleTCP(conn adapter.TCPConn) {
@@ -162,7 +202,20 @@ func (h *transportHandler) process(ctx context.Context) {
 		case conn := <-h.tcpQueue:
 			go h.handleTCPConn(conn)
 		case conn := <-h.udpQueue:
-			go h.handleUDPConn(conn)
+			if h.udpSem == nil {
+				go h.handleUDPConn(conn)
+				break
+			}
+			select {
+			case h.udpSem <- struct{}{}:
+				go func(c adapter.UDPConn) {
+					defer func() { <-h.udpSem }()
+					h.handleUDPConn(c)
+				}(conn)
+			default:
+				// Concurrency limit reached; drop new UDP flow quickly.
+				_ = conn.Close()
+			}
 		case <-func() <-chan time.Time {
 			if cleanupTicker == nil {
 				return nil
@@ -412,26 +465,9 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 				ro.Host = address
 
 				var buf bytes.Buffer
-				if useProxy && h.forwarder != nil {
-					baseRouter, ok := any(h.opts.Router).(interface {
-						Options() *corechain.RouterOptions
-					})
-					if ok {
-						c := xchain.NewChain("tungo-forwarder")
-						c.AddHop(protocolPinnedHop{base: h.forwarder, tcpNodeName: "tcp-wss", udpNodeName: "udp-dtls"})
-						bo := baseRouter.Options()
-						proxyRouter := xchain.NewRouter(
-							corechain.RetriesRouterOption(bo.Retries),
-							corechain.TimeoutRouterOption(bo.Timeout),
-							corechain.InterfaceRouterOption(bo.IfceName),
-							corechain.NetnsRouterOption(bo.Netns),
-							corechain.SockOptsRouterOption(bo.SockOpts),
-							corechain.ResolverRouterOption(bo.Resolver),
-							corechain.HostMapperRouterOption(bo.HostMapper),
-							corechain.ChainRouterOption(c),
-							corechain.LoggerRouterOption(log),
-						)
-						cc, err = proxyRouter.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
+				if useProxy {
+					if pr := h.getProxyRouter(); pr != nil {
+						cc, err = pr.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
 					} else {
 						cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, address)
 					}
@@ -568,30 +604,9 @@ func (h *transportHandler) handleTCPConn(originConn adapter.TCPConn) {
 		}
 	}
 	// reuse the outer err so the deferred recorder sees failures
-	if useProxy && h.forwarder != nil {
-		baseRouter, ok := any(h.opts.Router).(interface {
-			Options() *corechain.RouterOptions
-		})
-		if ok {
-			bo := baseRouter.Options()
-			if bo != nil {
-				c := xchain.NewChain("tungo-forwarder")
-				c.AddHop(protocolPinnedHop{base: h.forwarder, tcpNodeName: "tcp-wss", udpNodeName: "udp-dtls"})
-				proxyRouter := xchain.NewRouter(
-					corechain.RetriesRouterOption(bo.Retries),
-					corechain.TimeoutRouterOption(bo.Timeout),
-					corechain.InterfaceRouterOption(bo.IfceName),
-					corechain.NetnsRouterOption(bo.Netns),
-					corechain.SockOptsRouterOption(bo.SockOpts),
-					corechain.ResolverRouterOption(bo.Resolver),
-					corechain.HostMapperRouterOption(bo.HostMapper),
-					corechain.ChainRouterOption(c),
-					corechain.LoggerRouterOption(log),
-				)
-				cc, err = proxyRouter.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
-			} else {
-				cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
-			}
+	if useProxy {
+		if pr := h.getProxyRouter(); pr != nil {
+			cc, err = pr.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
 		} else {
 			cc, err = h.opts.Router.Dial(ictx.ContextWithBuffer(ctx, &buf), network, dialAddr)
 		}

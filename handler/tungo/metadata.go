@@ -18,6 +18,10 @@ type metadata struct {
 	udpTimeout    time.Duration
 	udpBufferSize int
 
+	// udpMaxConcurrency limits the number of concurrently handled UDP flows.
+	// 0 means unlimited.
+	udpMaxConcurrency int
+
 	// proxyDialByDomain controls whether PROXY routing will dial the upstream
 	// destination using a domain name (SOCKS5 ATYP=DOMAIN) when available.
 	// When false (default), tungo dials by the original destination IP address
@@ -48,6 +52,15 @@ type metadata struct {
 func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.udpTimeout = mdutil.GetDuration(md, "udpTimeout", "tungo.udpTimeout")
 	h.md.udpBufferSize = mdutil.GetInt(md, "udp.bufferSize", "udpBufferSize")
+	h.md.udpMaxConcurrency = mdutil.GetInt(md,
+		"udp.maxConcurrency",
+		"udpMaxConcurrency",
+		"tungo.udp.maxConcurrency",
+		"tungo.udpMaxConcurrency",
+	)
+	if h.md.udpMaxConcurrency < 0 {
+		h.md.udpMaxConcurrency = 0
+	}
 
 	// Default is false: do not trigger server-side DNS lookups via SOCKS5 domain targets.
 	h.md.proxyDialByDomain = mdutil.GetBool(md,
