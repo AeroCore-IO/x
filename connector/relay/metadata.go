@@ -4,14 +4,14 @@ import (
 	"time"
 
 	mdata "github.com/go-gost/core/metadata"
-	mdutil "github.com/go-gost/x/metadata/util"
 	"github.com/go-gost/x/internal/util/mux"
+	mdutil "github.com/go-gost/x/metadata/util"
 )
 
 type metadata struct {
-	connectTimeout time.Duration
-	noDelay        bool
-	muxCfg         *mux.Config
+	connectTimeout       time.Duration
+	noDelay              bool
+	muxCfg               *mux.Config
 	udpKeepAliveInterval time.Duration
 }
 

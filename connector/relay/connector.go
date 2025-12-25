@@ -133,7 +133,7 @@ func (c *relayConnector) Connect(ctx context.Context, conn net.Conn, network, ad
 		}
 	case "udp", "udp4", "udp6":
 		cc := &udpConn{
-			Conn: conn,
+			Conn:              conn,
 			keepaliveInterval: c.md.udpKeepAliveInterval,
 		}
 		if !c.md.noDelay {
