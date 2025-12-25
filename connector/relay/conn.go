@@ -9,6 +9,7 @@ import (
 	"math"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/go-gost/core/common/bufpool"
 	mdata "github.com/go-gost/core/metadata"
@@ -57,6 +58,56 @@ type udpConn struct {
 	wbuf *bytes.Buffer
 	once sync.Once
 	mu   sync.Mutex
+
+	keepaliveInterval time.Duration
+	kaOnce            sync.Once
+	kaStop            chan struct{}
+}
+
+func (c *udpConn) startKeepalive() {
+	if c.keepaliveInterval <= 0 {
+		return
+	}
+
+	c.kaOnce.Do(func() {
+		c.kaStop = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(c.keepaliveInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					// Never send keepalive before the request header is flushed.
+					c.mu.Lock()
+					pendingHandshake := c.wbuf != nil && c.wbuf.Len() > 0
+					c.mu.Unlock()
+					if pendingHandshake {
+						continue
+					}
+
+					c.mu.Lock()
+					_, err := c.Conn.Write([]byte{0, 0})
+					c.mu.Unlock()
+					if err != nil {
+						return
+					}
+				case <-c.kaStop:
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (c *udpConn) Close() error {
+	if c.kaStop != nil {
+		select {
+		case <-c.kaStop:
+		default:
+			close(c.kaStop)
+		}
+	}
+	return c.Conn.Close()
 }
 
 func (c *udpConn) Read(b []byte) (n int, err error) {
@@ -105,6 +156,8 @@ func (c *udpConn) Write(b []byte) (n int, err error) {
 		c.wbuf.Write(bb[:])
 		c.wbuf.Write(b) // append the data to the cached header
 		_, err = c.wbuf.WriteTo(c.Conn)
+		// The first write flushes the relay request header.
+		c.startKeepalive()
 		return
 	}
 
@@ -114,7 +167,11 @@ func (c *udpConn) Write(b []byte) (n int, err error) {
 	if err != nil {
 		return
 	}
-	return c.Conn.Write(b)
+	n, err = c.Conn.Write(b)
+	if err == nil {
+		c.startKeepalive()
+	}
+	return
 }
 
 func readResponse(r io.Reader) (err error) {

@@ -2,6 +2,8 @@ package relay
 
 import (
 	"net"
+	"sync"
+	"time"
 
 	"github.com/go-gost/gosocks5"
 	"github.com/go-gost/relay"
@@ -33,6 +35,53 @@ func StatusText(code uint8) string {
 type udpTunConn struct {
 	net.Conn
 	taddr net.Addr
+
+	mu     sync.Mutex
+	kaOnce sync.Once
+	kaStop chan struct{}
+}
+
+func (c *udpTunConn) StartKeepalive(interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+
+	c.kaOnce.Do(func() {
+		c.kaStop = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(interval)
+			defer ticker.Stop()
+
+			kaAddr, _ := net.ResolveUDPAddr("udp", "127.0.0.1:1")
+			for {
+				select {
+				case <-ticker.C:
+					if kaAddr == nil {
+						continue
+					}
+					c.mu.Lock()
+					_, err := c.writeToLocked(nil, kaAddr)
+					c.mu.Unlock()
+					if err != nil {
+						return
+					}
+				case <-c.kaStop:
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (c *udpTunConn) Close() error {
+	if c.kaStop != nil {
+		select {
+		case <-c.kaStop:
+		default:
+			close(c.kaStop)
+		}
+	}
+	return c.Conn.Close()
 }
 
 func UDPTunClientConn(c net.Conn, targetAddr net.Addr) net.Conn {
@@ -83,6 +132,12 @@ func (c *udpTunConn) Read(b []byte) (n int, err error) {
 }
 
 func (c *udpTunConn) WriteTo(b []byte, addr net.Addr) (n int, err error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.writeToLocked(b, addr)
+}
+
+func (c *udpTunConn) writeToLocked(b []byte, addr net.Addr) (n int, err error) {
 	socksAddr := gosocks5.Addr{}
 	if err = socksAddr.ParseFrom(addr.String()); err != nil {
 		return

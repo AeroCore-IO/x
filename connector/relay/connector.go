@@ -74,7 +74,13 @@ func (c *relayConnector) Connect(ctx context.Context, conn net.Conn, network, ad
 			}
 			log.Debugf("associate on %s OK", baddr)
 
-			return relay_util.UDPTunClientConn(conn, nil), nil
+			cc := relay_util.UDPTunClientConn(conn, nil)
+			if c.md.udpKeepAliveInterval > 0 {
+				if ka, ok := cc.(interface{ StartKeepalive(time.Duration) }); ok {
+					ka.StartKeepalive(c.md.udpKeepAliveInterval)
+				}
+			}
+			return cc, nil
 		}
 
 	case "unix":
@@ -128,6 +134,7 @@ func (c *relayConnector) Connect(ctx context.Context, conn net.Conn, network, ad
 	case "udp", "udp4", "udp6":
 		cc := &udpConn{
 			Conn: conn,
+			keepaliveInterval: c.md.udpKeepAliveInterval,
 		}
 		if !c.md.noDelay {
 			cc.wbuf = &bytes.Buffer{}
@@ -136,6 +143,7 @@ func (c *relayConnector) Connect(ctx context.Context, conn net.Conn, network, ad
 			}
 		}
 		conn = cc
+		cc.startKeepalive()
 	default:
 		err := fmt.Errorf("network %s is unsupported", network)
 		log.Error(err)

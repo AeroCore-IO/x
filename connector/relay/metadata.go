@@ -12,6 +12,7 @@ type metadata struct {
 	connectTimeout time.Duration
 	noDelay        bool
 	muxCfg         *mux.Config
+	udpKeepAliveInterval time.Duration
 }
 
 func (c *relayConnector) parseMetadata(md mdata.Metadata) (err error) {
@@ -22,6 +23,10 @@ func (c *relayConnector) parseMetadata(md mdata.Metadata) (err error) {
 
 	c.md.connectTimeout = mdutil.GetDuration(md, connectTimeout)
 	c.md.noDelay = mdutil.GetBool(md, noDelay)
+
+	// For UDP relay streams, optionally send a periodic zero-length frame
+	// to keep NAT/conntrack state alive.
+	c.md.udpKeepAliveInterval = mdutil.GetDuration(md, "udp.keepaliveInterval")
 
 	c.md.muxCfg = &mux.Config{
 		Version:           mdutil.GetInt(md, "mux.version"),
