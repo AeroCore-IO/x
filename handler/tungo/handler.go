@@ -159,6 +159,8 @@ func (h *tungoHandler) Handle(ctx context.Context, conn net.Conn, opts ...handle
 		ipv6: h.md.ipv6,
 
 		opts: &h.options,
+
+		statsGUID: h.md.statsGUID,
 	}
 
 	th.ProcessAsync()
