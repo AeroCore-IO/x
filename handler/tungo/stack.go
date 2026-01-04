@@ -142,6 +142,9 @@ type transportHandler struct {
 	proxyRouter     *xchain.Router
 
 	opts *handler.Options
+
+	// statsGUID is the GUID used to look up the TrafficStatsReporter.
+	statsGUID string
 }
 
 func (h *transportHandler) getProxyRouter() *xchain.Router {
@@ -804,6 +807,12 @@ func (h *transportHandler) handleUDPConn(uc adapter.UDPConn) {
 	}
 	defer cc.Close()
 
+	// Dispatch OnConnectionStart callback for UDP session lifecycle.
+	if h.statsGUID != "" {
+		dispatchOnConnectionStart(h.statsGUID, "udp", remoteAddr.String(), dstAddr.String())
+		defer dispatchOnConnectionEnd(h.statsGUID, "udp", remoteAddr.String(), dstAddr.String())
+	}
+
 	// Refresh UDP conntrack on activity.
 	{
 		touch := func() {
@@ -845,7 +854,7 @@ func (h *transportHandler) pipePacketData(conn1, conn2 net.Conn, ro *xrecorder.H
 		buf := bufpool.Get(bufferSize)
 		defer bufpool.Put(buf)
 
-		copyPacketData(conn1, conn2, buf, h.sniffing, false, ro, timeout)
+		copyPacketData(conn1, conn2, buf, h.sniffing, false, ro, timeout, h.statsGUID)
 	}()
 	go func() {
 		defer wg.Done()
@@ -853,12 +862,12 @@ func (h *transportHandler) pipePacketData(conn1, conn2 net.Conn, ro *xrecorder.H
 		buf := bufpool.Get(bufferSize)
 		defer bufpool.Put(buf)
 
-		copyPacketData(conn2, conn1, buf, h.sniffing, true, ro, timeout)
+		copyPacketData(conn2, conn1, buf, h.sniffing, true, ro, timeout, h.statsGUID)
 	}()
 	wg.Wait()
 }
 
-func copyPacketData(dst, src net.Conn, buf []byte, sniffing bool, c2s bool, ro *xrecorder.HandlerRecorderObject, timeout time.Duration) error {
+func copyPacketData(dst, src net.Conn, buf []byte, sniffing bool, c2s bool, ro *xrecorder.HandlerRecorderObject, timeout time.Duration, statsGUID string) error {
 	isDNS := false
 
 	for {
@@ -874,6 +883,30 @@ func copyPacketData(dst, src net.Conn, buf []byte, sniffing bool, c2s bool, ro *
 
 		if n == 0 {
 			return nil
+		}
+
+		// Dispatch OnPacket callback for UDP traffic metering.
+		// c2s==false means conn1->conn2 (client to server, RX from remote perspective)
+		// c2s==true means conn2->conn1 (server to client, TX from remote perspective)
+		if statsGUID != "" {
+			direction := "rx"
+			if c2s {
+				direction = "tx"
+			}
+			// ro.RemoteAddr is the client, ro.DstAddr is the destination
+			// For RX: traffic from remote (client) to destination
+			// For TX: traffic from destination back to remote (client)
+			srcAddr := ro.RemoteAddr
+			dstAddr := ro.DstAddr
+			if c2s {
+				// For server->client traffic, swap the addresses
+				srcAddr = ro.SrcAddr
+				if srcAddr == "" {
+					srcAddr = ro.DstAddr
+				}
+				dstAddr = ro.RemoteAddr
+			}
+			dispatchOnPacket(statsGUID, "udp", direction, srcAddr, dstAddr, n)
 		}
 
 		if sniffing {

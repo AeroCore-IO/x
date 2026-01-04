@@ -47,6 +47,9 @@ type metadata struct {
 	tcpSendBufferSize        int
 	tcpReceiveBufferSize     int
 	tcpModerateReceiveBuffer bool
+
+	// statsGUID is the GUID used to look up the TrafficStatsReporter for UDP traffic metering.
+	statsGUID string
 }
 
 func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
@@ -107,6 +110,8 @@ func (h *tungoHandler) parseMetadata(md mdata.Metadata) (err error) {
 	h.md.tcpSendBufferSize = mdutil.GetInt(md, "tcpSendBufferSize", "tungo.tcpSendBufferSize")
 	h.md.tcpReceiveBufferSize = mdutil.GetInt(md, "tcpReceiveBufferSize", "tungo.tcpReceiveBufferSize")
 	h.md.tcpModerateReceiveBuffer = mdutil.GetBool(md, "tcpModerateReceiveBuffer", "tungo.tcpModerateReceiveBuffer")
+
+	h.md.statsGUID = mdutil.GetString(md, "statsGUID", "tungo.statsGUID", "stats.guid")
 
 	return
 }
