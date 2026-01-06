@@ -86,6 +86,70 @@
 //  4. The tungo handler will automatically call the reporter's methods for UDP traffic
 //  5. Wing can unregister the reporter during shutdown with UnregisterStatsReporter
 //
+// # Realistic Usage Pattern
+//
+// Real implementations typically use per-connection metering with metadata tracking.
+// Here's a pattern based on actual Wing implementation:
+//
+//	// normalizeConnID creates a consistent connection identifier
+//	func normalizeConnID(srcAddr, dstAddr, protocol string) string {
+//		return fmt.Sprintf("%s->%s/%s", srcAddr, dstAddr, strings.ToLower(protocol))
+//	}
+//
+//	type StatsReporter struct {
+//		metersMu sync.RWMutex
+//		meters   map[string]*Meter  // key: normalized connID
+//	}
+//
+//	func (r *StatsReporter) OnPacket(protocol, direction, srcAddr, dstAddr string, bytes int) {
+//		connID := normalizeConnID(srcAddr, dstAddr, protocol)
+//		meter := r.getOrCreateMeter(connID, protocol, srcAddr, dstAddr)
+//
+//		if direction == "rx" {
+//			meter.rxBytes.Add(int64(bytes))
+//		} else if direction == "tx" {
+//			meter.txBytes.Add(int64(bytes))
+//		}
+//	}
+//
+//	func (r *StatsReporter) OnConnectionStart(protocol, srcAddr, dstAddr string) {
+//		connID := normalizeConnID(srcAddr, dstAddr, protocol)
+//		r.getOrCreateMeter(connID, protocol, srcAddr, dstAddr)
+//	}
+//
+//	func (r *StatsReporter) OnConnectionEnd(protocol, srcAddr, dstAddr string) {
+//		connID := normalizeConnID(srcAddr, dstAddr, protocol)
+//		r.metersMu.Lock()
+//		if meter, exists := r.meters[connID]; exists {
+//			delete(r.meters, connID)
+//			// Clean up meter resources
+//		}
+//		r.metersMu.Unlock()
+//	}
+//
+//	// getOrCreateMeter uses double-check locking for thread-safe meter creation
+//	func (r *StatsReporter) getOrCreateMeter(connID, protocol, srcAddr, dstAddr string) *Meter {
+//		r.metersMu.RLock()
+//		if meter, exists := r.meters[connID]; exists {
+//			r.metersMu.RUnlock()
+//			return meter
+//		}
+//		r.metersMu.RUnlock()
+//
+//		r.metersMu.Lock()
+//		defer r.metersMu.Unlock()
+//		if meter, exists := r.meters[connID]; exists {
+//			return meter
+//		}
+//
+//		meter := &Meter{/* initialize */}
+//		r.meters[connID] = meter
+//		return meter
+//	}
+//
+// This pattern provides per-connection isolation, efficient concurrent access,
+// and proper cleanup on connection termination.
+//
 // # Protocol and Direction Conventions
 //
 // - protocol: Currently always "udp" for UDP traffic
