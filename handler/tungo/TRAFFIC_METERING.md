@@ -78,11 +78,17 @@ handler.Init(md)
 
 ## Complete Example
 
-See the [stats_integration_test.go](stats_integration_test.go) file for complete working examples, including:
+The Wing integration pattern above demonstrates a production-ready implementation. For additional examples, see:
 
-- Basic traffic metering
-- Per-session statistics tracking
-- Thread-safe implementations using atomic operations
+- [stats_test.go](stats_test.go) - Unit tests including `realisticStatsReporter` 
+- [stats_integration_test.go](stats_integration_test.go) - Integration tests with concurrent scenarios
+- [example_usage.go](example_usage.go) - Simple standalone example
+
+Key implementation patterns demonstrated:
+- Per-connection metering with normalized connection IDs
+- Thread-safe meter creation using double-check locking
+- Metadata enrichment and tracking
+- Proper lifecycle management and cleanup
 
 ## API Reference
 
@@ -123,63 +129,215 @@ func UnregisterStatsReporter(guid string)
 
 ## Wing Integration Pattern
 
-For Wing applications, the recommended integration pattern is:
+For Wing applications, the recommended integration pattern uses per-connection metering with metadata tracking:
 
 ```go
-package main
+package tun
 
 import (
-    "sync/atomic"
+    "fmt"
+    "strings"
+    "sync"
+    "time"
+
+    "ac-wing/internal/config"
+    "ac-wing/internal/traffic"
     "github.com/go-gost/x/handler/tungo"
+    "go.uber.org/zap"
 )
 
-// WingTrafficMeter implements traffic metering for Wing
-type WingTrafficMeter struct {
-    rxBytes   atomic.Uint64
-    txBytes   atomic.Uint64
-    rxPackets atomic.Uint64
-    txPackets atomic.Uint64
+// normalizeConnID creates a normalized connection identifier
+func normalizeConnID(srcAddr, dstAddr, protocol string) string {
+    return fmt.Sprintf("%s->%s/%s", srcAddr, dstAddr, strings.ToLower(protocol))
 }
 
-func (w *WingTrafficMeter) OnPacket(protocol, direction, srcAddr, dstAddr string, byteSize int) {
-    if direction == "rx" {
-        w.rxBytes.Add(uint64(byteSize))
-        w.rxPackets.Add(1)
-    } else if direction == "tx" {
-        w.txBytes.Add(uint64(byteSize))
-        w.txPackets.Add(1)
+// StatsReporter implements tungo.TrafficStatsReporter interface
+type StatsReporter struct {
+    logger        *zap.SugaredLogger
+    metersMu      sync.RWMutex
+    meters        map[string]*traffic.Meter
+    meterInterval time.Duration
+
+    // Store metadata for connections
+    connMetaMu sync.RWMutex
+    connMeta   map[string]traffic.Metadata // key: normalized connID
+}
+
+func NewStatsReporter(logger *zap.SugaredLogger, cfg *config.Config) *StatsReporter {
+    return &StatsReporter{
+        logger:        logger,
+        meters:        make(map[string]*traffic.Meter),
+        meterInterval: cfg.Flexible.Performance.TrafficLogIntervalDuration(),
+        connMeta:      make(map[string]traffic.Metadata),
     }
 }
 
-func (w *WingTrafficMeter) OnConnectionStart(protocol, srcAddr, dstAddr string) {
-    // Track session start if needed
+// UpdateMetadata updates metadata for a connection (optional, called externally)
+func (r *StatsReporter) UpdateMetadata(srcAddr, dstAddr, protocol string, meta traffic.Metadata) {
+    connID := normalizeConnID(srcAddr, dstAddr, protocol)
+
+    r.connMetaMu.Lock()
+    if existing, ok := r.connMeta[connID]; ok {
+        // Merge with existing metadata
+        for k, v := range meta {
+            existing[k] = v
+        }
+        r.connMeta[connID] = existing
+    } else {
+        r.connMeta[connID] = meta
+    }
+    r.connMetaMu.Unlock()
+
+    // Also update the meter if it already exists
+    r.metersMu.RLock()
+    if meter, exists := r.meters[connID]; exists {
+        meter.AddMetadata(meta)
+    }
+    r.metersMu.RUnlock()
 }
 
-func (w *WingTrafficMeter) OnConnectionEnd(protocol, srcAddr, dstAddr string) {
-    // Clean up session state if needed
+// OnPacket implements the tungo.TrafficStatsReporter interface
+func (r *StatsReporter) OnPacket(protocol, direction, srcAddr, dstAddr string, bytes int) {
+    connID := normalizeConnID(srcAddr, dstAddr, protocol)
+    meter := r.getOrCreateMeter(connID, protocol, srcAddr, dstAddr)
+
+    if meter != nil {
+        // Record bytes based on direction
+        if direction == "rx" {
+            meter.RecordTargetToClient(int64(bytes))
+        } else if direction == "tx" {
+            meter.RecordClientToTarget(int64(bytes))
+        }
+    }
 }
 
-func (w *WingTrafficMeter) GetStats() (rxBytes, txBytes, rxPkts, txPkts uint64) {
-    return w.rxBytes.Load(), w.txBytes.Load(), 
-           w.rxPackets.Load(), w.txPackets.Load()
+// OnConnectionStart implements the tungo.TrafficStatsReporter interface
+func (r *StatsReporter) OnConnectionStart(protocol, srcAddr, dstAddr string) {
+    connID := normalizeConnID(srcAddr, dstAddr, protocol)
+
+    r.logger.Infow("📡 TUN connection started",
+        "conn_id", connID,
+        "protocol", strings.ToUpper(protocol),
+        "src", srcAddr,
+        "dst", dstAddr,
+    )
+
+    // Pre-create meter
+    r.getOrCreateMeter(connID, protocol, srcAddr, dstAddr)
 }
 
+// OnConnectionEnd implements the tungo.TrafficStatsReporter interface
+func (r *StatsReporter) OnConnectionEnd(protocol, srcAddr, dstAddr string) {
+    connID := normalizeConnID(srcAddr, dstAddr, protocol)
+
+    r.metersMu.Lock()
+    meter, exists := r.meters[connID]
+    if exists {
+        delete(r.meters, connID)
+    }
+    r.metersMu.Unlock()
+
+    r.connMetaMu.Lock()
+    delete(r.connMeta, connID)
+    r.connMetaMu.Unlock()
+
+    if exists {
+        meter.Stop()
+
+        r.logger.Infow("📡 TUN connection ended",
+            "conn_id", connID,
+            "protocol", strings.ToUpper(protocol),
+        )
+    }
+}
+
+// getOrCreateMeter uses double-check locking for thread-safe meter creation
+func (r *StatsReporter) getOrCreateMeter(connID, protocol, srcAddr, dstAddr string) *traffic.Meter {
+    r.metersMu.RLock()
+    if meter, exists := r.meters[connID]; exists {
+        r.metersMu.RUnlock()
+        return meter
+    }
+    r.metersMu.RUnlock()
+
+    r.metersMu.Lock()
+    defer r.metersMu.Unlock()
+
+    // Double-check after acquiring write lock
+    if meter, exists := r.meters[connID]; exists {
+        return meter
+    }
+
+    meta := traffic.Metadata{
+        "conn_type": "tun",
+        "protocol":  strings.ToUpper(protocol),
+        "src_addr":  srcAddr,
+        "dst_addr":  dstAddr,
+    }
+
+    // Merge with pre-populated metadata (from external sources)
+    r.connMetaMu.RLock()
+    if existingMeta, ok := r.connMeta[connID]; ok {
+        for k, v := range existingMeta {
+            meta[k] = v
+        }
+    }
+    r.connMetaMu.RUnlock()
+
+    meter := traffic.NewMeter(r.logger, connID, r.meterInterval, meta)
+    meter.Start()
+
+    r.meters[connID] = meter
+
+    r.logger.Infow("📊 TUN traffic meter started",
+        "conn_id", connID,
+        "protocol", strings.ToUpper(protocol),
+        "src", srcAddr,
+        "dst", dstAddr)
+
+    return meter
+}
+
+// Close stops all active meters
+func (r *StatsReporter) Close() {
+    r.metersMu.Lock()
+    defer r.metersMu.Unlock()
+
+    for connID, meter := range r.meters {
+        meter.Stop()
+        r.logger.Debugw("TUN traffic meter stopped", "conn_id", connID)
+    }
+    r.meters = make(map[string]*traffic.Meter)
+
+    r.connMetaMu.Lock()
+    r.connMeta = make(map[string]traffic.Metadata)
+    r.connMetaMu.Unlock()
+}
+
+// Usage in Wing initialization:
 func main() {
-    // Wing initialization
-    meter := &WingTrafficMeter{}
+    logger := zap.NewExample().Sugar()
+    cfg := config.Load()
+    
+    reporter := NewStatsReporter(logger, cfg)
     wingGUID := "wing-instance-123"
     
-    tungo.RegisterStatsReporter(wingGUID, meter)
+    tungo.RegisterStatsReporter(wingGUID, reporter)
     defer tungo.UnregisterStatsReporter(wingGUID)
+    defer reporter.Close()
     
     // Configure handler with the same GUID in metadata
     // ... run Wing application ...
-    
-    // Periodically read stats
-    rx, tx, rxPkts, txPkts := meter.GetStats()
-    // ... report or log stats ...
 }
 ```
+
+### Key Features
+
+1. **Per-Connection Metering**: Each connection gets its own meter identified by normalized connID
+2. **Metadata Tracking**: Supports enriching connections with metadata (app ID, hostname, etc.)
+3. **Thread-Safe**: Uses double-check locking pattern for efficient concurrent access
+4. **Lifecycle Management**: Automatic cleanup of meters on connection end
+5. **Logging Integration**: Rich logging for debugging and monitoring
 
 ## Performance Considerations
 
