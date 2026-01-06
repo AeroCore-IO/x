@@ -158,6 +158,27 @@
 //   - "tx": Transmitted packets (from destination back to client/remote)
 // - srcAddr/dstAddr: Always in "ip:port" format (e.g., "10.0.0.1:12345")
 //
+// # Address Ordering in OnPacket
+//
+// IMPORTANT: For TX packets, the srcAddr and dstAddr parameters are swapped
+// compared to RX packets:
+//
+//   - RX direction: srcAddr=client, dstAddr=server
+//   - TX direction: srcAddr=server, dstAddr=client (addresses swapped!)
+//
+// When normalizing connection IDs, implementations should account for this:
+//
+//	func (r *Reporter) OnPacket(protocol, direction, srcAddr, dstAddr string, bytes int) {
+//		var connID string
+//		if direction == "tx" {
+//			// Normalize back to client->server order
+//			connID = fmt.Sprintf("%s->%s/%s", dstAddr, srcAddr, protocol)
+//		} else {
+//			connID = fmt.Sprintf("%s->%s/%s", srcAddr, dstAddr, protocol)
+//		}
+//		// ... use connID to track connection ...
+//	}
+//
 // # Performance Considerations
 //
 // When no reporter is registered for a GUID, the dispatcher functions perform

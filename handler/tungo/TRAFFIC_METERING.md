@@ -125,7 +125,22 @@ func UnregisterStatsReporter(guid string)
 ### Direction Semantics
 
 - **`"rx"`**: Packets received from the client/remote endpoint to the destination
+  - `srcAddr` = client address, `dstAddr` = server address
 - **`"tx"`**: Packets transmitted from the destination back to the client/remote endpoint
+  - `srcAddr` = server address, `dstAddr` = client address (addresses are swapped!)
+
+**Important**: For TX packets, the `srcAddr` and `dstAddr` parameters are swapped compared to RX packets. Implementations should normalize connection IDs to maintain consistency:
+
+```go
+// Normalize connection ID handling address swapping
+if direction == "tx" {
+    connID = fmt.Sprintf("%s->%s/%s", dstAddr, srcAddr, protocol)
+} else {
+    connID = fmt.Sprintf("%s->%s/%s", srcAddr, dstAddr, protocol)
+}
+```
+
+This ensures the same connection ID is used for both RX and TX packets of the same connection.
 
 ## Wing Integration Pattern
 
@@ -198,8 +213,24 @@ func (r *StatsReporter) UpdateMetadata(srcAddr, dstAddr, protocol string, meta t
 
 // OnPacket implements the tungo.TrafficStatsReporter interface
 func (r *StatsReporter) OnPacket(protocol, direction, srcAddr, dstAddr string, bytes int) {
-    connID := normalizeConnID(srcAddr, dstAddr, protocol)
-    meter := r.getOrCreateMeter(connID, protocol, srcAddr, dstAddr)
+    // Normalize connection ID - handle address swapping for TX packets
+    var connID string
+    var normalizedSrc, normalizedDst string
+    
+    if direction == "tx" {
+        // TX packets have swapped addresses (server->client)
+        // Normalize back to client->server order for consistent connID
+        connID = normalizeConnID(dstAddr, srcAddr, protocol)
+        normalizedSrc = dstAddr
+        normalizedDst = srcAddr
+    } else {
+        // RX packets are in correct order (client->server)
+        connID = normalizeConnID(srcAddr, dstAddr, protocol)
+        normalizedSrc = srcAddr
+        normalizedDst = dstAddr
+    }
+    
+    meter := r.getOrCreateMeter(connID, protocol, normalizedSrc, normalizedDst)
 
     if meter != nil {
         // Record bytes based on direction

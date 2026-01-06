@@ -48,8 +48,24 @@ func newRealisticStatsReporter() *realisticStatsReporter {
 }
 
 func (r *realisticStatsReporter) OnPacket(protocol, direction, srcAddr, dstAddr string, byteSize int) {
-	connID := normalizeConnID(srcAddr, dstAddr, protocol)
-	meter := r.getOrCreateMeter(connID, protocol, srcAddr, dstAddr)
+	// Normalize connection ID to maintain consistent ordering
+	// For TX packets, addresses are swapped (dst->src), so we normalize them
+	var connID string
+	var normalizedSrc, normalizedDst string
+	
+	if direction == "tx" {
+		// TX packets have swapped addresses, normalize back to client->server order
+		connID = normalizeConnID(dstAddr, srcAddr, protocol)
+		normalizedSrc = dstAddr
+		normalizedDst = srcAddr
+	} else {
+		// RX packets already in correct order (client->server)
+		connID = normalizeConnID(srcAddr, dstAddr, protocol)
+		normalizedSrc = srcAddr
+		normalizedDst = dstAddr
+	}
+	
+	meter := r.getOrCreateMeter(connID, protocol, normalizedSrc, normalizedDst)
 
 	// Record bytes based on direction - matches Wing's implementation
 	if direction == "rx" {
